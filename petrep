@@ -1,0 +1,137 @@
+-- Simple Inventory Scanner (All Pets, No Ping, No Rarity)
+
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+local INVENTORY_WEBHOOK = "https://discord.com/api/webhooks/XXXXXXXX/XXXXXXXX"
+local CHECK_INTERVAL = 300 -- 5 minutes
+
+print("=== INVENTORY SCANNER STARTED ===")
+
+local function findPetContainer(player)
+    local gui = player:FindFirstChild("PlayerGui")
+    if not gui then return nil end
+
+    local possiblePaths = {
+        "Tabs.Inventory.Menu.Categories.Pets.Inner.List.Container",
+        "Inventory.Frame.Pets.ScrollingFrame",
+        "Main.Inventory.Pets.List",
+        "Inventory.Pets.Container"
+    }
+
+    for _, path in ipairs(possiblePaths) do
+        local obj = gui
+        for part in path:gmatch("[^.]+") do
+            obj = obj:FindFirstChild(part)
+            if not obj then break end
+        end
+        if obj then
+            return obj
+        end
+    end
+
+    return nil
+end
+
+local function scanInventory()
+    local player = Players.LocalPlayer
+    local petCounts = {}
+    local totalPets = 0
+
+    local container = findPetContainer(player)
+    if not container then
+        warn("Could not find pet container")
+        return petCounts, 0
+    end
+
+    for _, item in pairs(container:GetChildren()) do
+        if item:IsA("Frame") or item:IsA("TextButton") or item:IsA("ImageButton") then
+            local petName
+
+            for _, labelName in ipairs({"Name", "PetName", "Title", "TextLabel"}) do
+                local label = item:FindFirstChild(labelName)
+                if label and label:IsA("TextLabel") and label.Text ~= "" then
+                    petName = label.Text
+                    break
+                end
+            end
+
+            petName = petName or item.Name
+            petName = tostring(petName):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+
+            petCounts[petName] = (petCounts[petName] or 0) + 1
+            totalPets += 1
+        end
+    end
+
+    return petCounts, totalPets
+end
+
+local function sendReport(petCounts, totalPets)
+    local playerName = Players.LocalPlayer.Name
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+
+    local petList = {}
+    for name, count in pairs(petCounts) do
+        table.insert(petList, {name = name, count = count})
+    end
+
+    table.sort(petList, function(a, b)
+        return a.count > b.count
+    end)
+
+    local inventoryText = ""
+    if #petList == 0 then
+        inventoryText = "No pets found"
+    else
+        for _, pet in ipairs(petList) do
+            inventoryText ..= string.format("• **%dx %s**\n", pet.count, pet.name)
+        end
+    end
+
+    local data = {
+        ["username"] = "Inventory Scanner",
+        ["embeds"] = {{
+            ["title"] = "📦 Pet Inventory Report",
+            ["description"] = string.format("**User:** %s\n**Time:** %s", playerName, timestamp),
+            ["color"] = 3447003,
+            ["fields"] = {
+                {
+                    ["name"] = "Pets",
+                    ["value"] = inventoryText,
+                    ["inline"] = false
+                },
+                {
+                    ["name"] = "Total Pets",
+                    ["value"] = tostring(totalPets),
+                    ["inline"] = true
+                }
+            }
+        }}
+    }
+
+    pcall(function()
+        http_request({
+            Url = INVENTORY_WEBHOOK,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(data)
+        })
+    end)
+end
+
+-- Startup
+wait(5)
+print("Scanning inventory for:", Players.LocalPlayer.Name)
+
+-- First scan
+local pets, total = scanInventory()
+sendReport(pets, total)
+
+-- Loop
+while true do
+    wait(CHECK_INTERVAL)
+    print("Rescanning inventory...")
+    local pets, total = scanInventory()
+    sendReport(pets, total)
+end
