@@ -3,7 +3,7 @@
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
-local INVENTORY_WEBHOOK = "https://discord.com/api/webhooks/XXXXXXXX/XXXXXXXX"
+local INVENTORY_WEBHOOK = "https://discord.com/api/webhooks/1467133699047952619/N80aqenP7w2IjSd0Rg3tg25MRbvRW2QIr7enJ09exaHD7odfboOkb2_QugbXKeeF8yTv"
 local CHECK_INTERVAL = 300 -- 5 minutes
 
 print("=== INVENTORY SCANNER STARTED ===")
@@ -92,7 +92,7 @@ local function sendReport(petCounts, totalPets)
     local data = {
         ["username"] = "Inventory Scanner",
         ["embeds"] = {{
-            ["title"] = "📦 Pet Inventory Report",
+            ["title"] = ":package: Pet Inventory Report",
             ["description"] = string.format("**User:** %s\n**Time:** %s", playerName, timestamp),
             ["color"] = 3447003,
             ["fields"] = {
