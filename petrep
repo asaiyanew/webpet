@@ -1,13 +1,25 @@
 -- Simple Inventory Scanner (All Pets, No Ping, No Rarity)
+-- With 5-minute change detection and hourly full reports
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
-local INVENTORY_WEBHOOK = "https://discord.com/api/webhooks/1467133699047952619/N80aqenP7w2IjSd0Rg3tg25MRbvRW2QIr7enJ09exaHD7odfboOkb2_QugbXKeeF8yTv"
-local CHECK_INTERVAL = 300 -- 5 minutes
+local FULL_REPORT_WEBHOOK = "https://discord.com/api/webhooks/1467133699047952619/N80aqenP7w2IjSd0Rg3tg25MRbvRW2QIr7enJ09exaHD7odfboOkb2_QugbXKeeF8yTv"
+local CHANGE_WEBHOOK = "https://discord.com/api/webhooks/1471506766755004467/lCdeUM3qfwwIBQCCkwcFLgB3HzkbFGWQdTw12-cbDGjNauA6tdTy92tEFJfEJf_F8kLe"
+local CHECK_INTERVAL = 10 -- 10 seconds
+local HOUR_INTERVAL = 360 -- 360 checks * 10 seconds = 3600 seconds = 1 hour
 
 print("=== INVENTORY SCANNER STARTED ===")
+print("Full reports every hour")
+print("Change detection every 5 minutes")
 
+-- Store previous values for change detection
+local previousPets = {}
+local previousHolderItems = {}
+
+--------------------------------------------------
+-- FIND PET CONTAINER
+--------------------------------------------------
 local function findPetContainer(player)
     local gui = player:FindFirstChild("PlayerGui")
     if not gui then return nil end
@@ -33,6 +45,9 @@ local function findPetContainer(player)
     return nil
 end
 
+--------------------------------------------------
+-- SCAN PET INVENTORY
+--------------------------------------------------
 local function scanInventory()
     local player = Players.LocalPlayer
     local petCounts = {}
@@ -67,10 +82,198 @@ local function scanInventory()
     return petCounts, totalPets
 end
 
-local function sendReport(petCounts, totalPets)
+--------------------------------------------------
+-- GET ALL HOLDER ITEMS (WITH DECIMALS)
+--------------------------------------------------
+local function getAllHolderItems()
+    local player = Players.LocalPlayer
+    if not player then return {} end
+
+    local holder = player:FindFirstChild("PlayerGui")
+        and player.PlayerGui:FindFirstChild("RightHud")
+        and player.PlayerGui.RightHud:FindFirstChild("Main")
+        and player.PlayerGui.RightHud.Main:FindFirstChild("RightUI")
+        and player.PlayerGui.RightHud.Main.RightUI:FindFirstChild("Items")
+        and player.PlayerGui.RightHud.Main.RightUI.Items:FindFirstChild("List")
+        and player.PlayerGui.RightHud.Main.RightUI.Items.List:FindFirstChild("Holder")
+
+    if not holder then
+        return {}
+    end
+
+    local results = {}
+
+    for _, item in pairs(holder:GetChildren()) do
+        local itemName = item.Name
+        local amount = nil
+
+        -- Try to extract numeric value (preserve decimals)
+        for _, obj in pairs(item:GetDescendants()) do
+            if obj:IsA("TextLabel") and obj.Text and obj.Text ~= "" then
+                -- Match numbers with optional decimals
+                local numberString = obj.Text:match("[%d%.]+")
+                if numberString then
+                    -- Convert to number to handle formatting
+                    local num = tonumber(numberString)
+                    if num then
+                        -- If it's a whole number, show as integer, otherwise keep decimals
+                        if num == math.floor(num) then
+                            amount = tostring(math.floor(num))
+                        else
+                            -- Keep 1 decimal place for consistency
+                            amount = string.format("%.1f", num)
+                        end
+                    else
+                        amount = numberString
+                    end
+                    break
+                end
+            end
+        end
+
+        -- If no number found but item exists, mark as "1"
+        if not amount then
+            amount = "1"
+        end
+
+        results[itemName] = amount
+    end
+
+    return results
+end
+
+--------------------------------------------------
+-- DETECT CHANGES
+--------------------------------------------------
+local function detectChanges(currentPets, currentHolderItems)
+    local changes = {}
+    local hasChanges = false
+    
+    -- Check for pet changes (gains/losses)
+    for petName, currentCount in pairs(currentPets) do
+        local previousCount = previousPets[petName] or 0
+        if currentCount > previousCount then
+            local gained = currentCount - previousCount
+            table.insert(changes, string.format("✅ **+%d %s**", gained, petName))
+            hasChanges = true
+        elseif currentCount < previousCount then
+            local lost = previousCount - currentCount
+            table.insert(changes, string.format("❌ **-%d %s**", lost, petName))
+            hasChanges = true
+        end
+    end
+    
+    -- Check for pets that are completely gone
+    for petName, previousCount in pairs(previousPets) do
+        if not currentPets[petName] then
+            table.insert(changes, string.format("❌ **-All %d %s (removed)**", previousCount, petName))
+            hasChanges = true
+        end
+    end
+    
+    -- Check for holder item changes
+    for itemName, currentAmount in pairs(currentHolderItems) do
+        local previousAmount = previousHolderItems[itemName]
+        if previousAmount then
+            -- Convert to numbers for comparison
+            local currentNum = tonumber(currentAmount) or 0
+            local previousNum = tonumber(previousAmount) or 0
+            
+            if currentNum > previousNum then
+                local gained = currentNum - previousNum
+                -- Format nicely (keep decimal if needed)
+                if gained == math.floor(gained) then
+                    table.insert(changes, string.format("💰 **+%d %s**", gained, itemName))
+                else
+                    table.insert(changes, string.format("💰 **+%.1f %s**", gained, itemName))
+                end
+                hasChanges = true
+            elseif currentNum < previousNum then
+                local lost = previousNum - currentNum
+                if lost == math.floor(lost) then
+                    table.insert(changes, string.format("💸 **-%d %s**", lost, itemName))
+                else
+                    table.insert(changes, string.format("💸 **-%.1f %s**", lost, itemName))
+               
+                end
+                hasChanges = true
+            end
+        else
+            -- New item appeared
+            table.insert(changes, string.format("🟢 **+%s %s (new)**", currentAmount, itemName))
+            hasChanges = true
+        end
+    end
+    
+    -- Check for items that disappeared
+    for itemName, previousAmount in pairs(previousHolderItems) do
+        if not currentHolderItems[itemName] then
+            table.insert(changes, string.format("🗑️ **Removed %s (was %s)**", itemName, previousAmount))
+            hasChanges = true
+        end
+    end
+    
+    return changes, hasChanges
+end
+
+--------------------------------------------------
+-- SEND CHANGE REPORT (5 MINUTES)
+--------------------------------------------------
+local function sendChangeReport(changes)
+    local playerName = Players.LocalPlayer.Name
+    local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+    
+    local changesText = ""
+    if #changes == 0 then
+        changesText = "No changes detected"
+    else
+        -- Limit to 20 changes to avoid webhook field limits
+        local maxChanges = math.min(#changes, 20)
+        for i = 1, maxChanges do
+            changesText ..= changes[i] .. "\n"
+        end
+        if #changes > 20 then
+            changesText ..= string.format("\n*...and %d more changes*", #changes - 20)
+        end
+    end
+    
+    local data = {
+        ["username"] = "Inventory Change Detector",
+        ["embeds"] = {{
+            ["title"] = ":mag: Inventory Changes Detected",
+            ["description"] = string.format("**User:** ||%s||\n**Time:** %s", playerName, timestamp),
+            ["color"] = 16776960, -- Yellow
+            ["fields"] = {
+                {
+                    ["name"] = "Changes",
+                    ["value"] = changesText,
+                    ["inline"] = false
+                }
+            },
+            ["footer"] = {
+                ["text"] = "Next full report in ~1 hour"
+            }
+        }}
+    }
+    
+    pcall(function()
+        http_request({
+            Url = CHANGE_WEBHOOK,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = HttpService:JSONEncode(data)
+        })
+    end)
+end
+
+--------------------------------------------------
+-- SEND FULL REPORT (1 HOUR)
+--------------------------------------------------
+local function sendFullReport(petCounts, totalPets, holderItems)
     local playerName = Players.LocalPlayer.Name
     local timestamp = os.date("%Y-%m-%d %H:%M:%S")
 
+    -- Sort pets
     local petList = {}
     for name, count in pairs(petCounts) do
         table.insert(petList, {name = name, count = count})
@@ -80,21 +283,40 @@ local function sendReport(petCounts, totalPets)
         return a.count > b.count
     end)
 
+    -- Format pet text
     local inventoryText = ""
     if #petList == 0 then
         inventoryText = "No pets found"
     else
-        for _, pet in ipairs(petList) do
-            inventoryText ..= string.format("• **%dx %s**\n", pet.count, pet.name)
+        -- Limit to 15 pets to avoid field limits
+        local maxPets = math.min(#petList, 15)
+        for i = 1, maxPets do
+            inventoryText ..= string.format("• **%dx %s**\n", petList[i].count, petList[i].name)
         end
+        if #petList > 15 then
+            inventoryText ..= string.format("\n*...and %d more pets*", #petList - 15)
+        end
+    end
+    
+    -- Format holder items text
+    local holderText = ""
+    local itemCount = 0
+    
+    for name, amount in pairs(holderItems) do
+        holderText ..= string.format("• %s: %s\n", name, amount)
+        itemCount += 1
+    end
+    
+    if itemCount == 0 then
+        holderText = "No items found"
     end
 
     local data = {
-        ["username"] = "Inventory Scanner",
+        ["username"] = "Hourly Inventory Report",
         ["embeds"] = {{
-            ["title"] = ":package: Pet Inventory Report",
-            ["description"] = string.format("**User:** %s\n**Time:** %s", playerName, timestamp),
-            ["color"] = 3447003,
+            ["title"] = ":package: Hourly Pet Inventory Report",
+            ["description"] = string.format("**User:** ||%s||\n**Time:** %s", playerName, timestamp),
+            ["color"] = 3447003, -- Blue
             ["fields"] = {
                 {
                     ["name"] = "Pets",
@@ -105,14 +327,32 @@ local function sendReport(petCounts, totalPets)
                     ["name"] = "Total Pets",
                     ["value"] = tostring(totalPets),
                     ["inline"] = true
+                },
+                {
+                    ["name"] = "Key Currencies",
+                    ["value"] = string.format(
+                        "**PaidTokens:** %s\n**Tokens:** %s\n**ElectricShard:** %s",
+                        holderItems["PaidTokens"] or "0",
+                        holderItems["Tokens"] or "0",
+                        holderItems["ElectricShard"] or "0"
+                    ),
+                    ["inline"] = false
+                },
+                {
+                    ["name"] = "Items & Currencies",
+                    ["value"] = holderText,
+                    ["inline"] = false
                 }
+            },
+            ["footer"] = {
+                ["text"] = "Checking for changes every 5 minutes"
             }
         }}
     }
 
     pcall(function()
         http_request({
-            Url = INVENTORY_WEBHOOK,
+            Url = FULL_REPORT_WEBHOOK,
             Method = "POST",
             Headers = {["Content-Type"] = "application/json"},
             Body = HttpService:JSONEncode(data)
@@ -120,18 +360,66 @@ local function sendReport(petCounts, totalPets)
     end)
 end
 
--- Startup
+--------------------------------------------------
+-- UPDATE STORED VALUES
+--------------------------------------------------
+local function updateStoredValues(petCounts, holderItems)
+    -- Copy current pets to previous
+    previousPets = {}
+    for name, count in pairs(petCounts) do
+        previousPets[name] = count
+    end
+    
+    -- Copy current holder items to previous
+    previousHolderItems = {}
+    for name, amount in pairs(holderItems) do
+        previousHolderItems[name] = amount
+    end
+end
+
+--------------------------------------------------
+-- START
+--------------------------------------------------
 wait(5)
 print("Scanning inventory for:", Players.LocalPlayer.Name)
 
--- First scan
+-- Initial scan
 local pets, total = scanInventory()
-sendReport(pets, total)
+local holderItems = getAllHolderItems()
+
+-- Send initial full report
+sendFullReport(pets, total, holderItems)
+
+-- Store initial values
+updateStoredValues(pets, holderItems)
 
 -- Loop
+local checkCounter = 0
 while true do
     wait(CHECK_INTERVAL)
-    print("Rescanning inventory...")
-    local pets, total = scanInventory()
-    sendReport(pets, total)
+    checkCounter = checkCounter + 1
+    
+    print(string.format("Check #%d - Scanning inventory...", checkCounter))
+    
+    -- Get current values
+    local currentPets, currentTotal = scanInventory()
+    local currentHolderItems = getAllHolderItems()
+    
+    -- Detect and send changes
+    local changes, hasChanges = detectChanges(currentPets, currentHolderItems)
+    if hasChanges then
+        print("Changes detected! Sending alert...")
+        sendChangeReport(changes)
+    else
+        print("No changes detected")
+    end
+    
+    -- Send full report every hour (12 checks)
+    if checkCounter % HOUR_INTERVAL == 0 then
+        print("Hourly full report sent")
+        sendFullReport(currentPets, currentTotal, currentHolderItems)
+    end
+    
+    -- Update stored values for next comparison
+    updateStoredValues(currentPets, currentHolderItems)
 end
